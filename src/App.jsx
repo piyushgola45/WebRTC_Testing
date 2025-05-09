@@ -4,6 +4,10 @@ import io from 'socket.io-client';
 const socket = io('https://webrtc-backend-q4qz.onrender.com');
 
 function App() {
+   const [messages, setMessages] = useState([]);
+  const [newMessage, setNewMessage] = useState('');
+  const messagesEndRef = useRef(null);
+
   const [userId, setUserId] = useState('');
   const [remoteUserId, setRemoteUserId] = useState('');
   const [callStatus, setCallStatus] = useState('disconnected');
@@ -15,6 +19,7 @@ function App() {
   const pcRef = useRef(null);
 
   // Initialize user ID on component mount
+
   useEffect(() => {
     const id = Math.random().toString(36).substring(2, 9);
     setUserId(id);
@@ -160,6 +165,73 @@ function App() {
       remoteVideoRef.current.srcObject = null;
     }
   };
+  const sendMessage = () => {
+    if (!newMessage.trim() || !remoteUserId) return;
+
+    const messageData = {
+      text: newMessage,
+      target: remoteUserId,
+      sender: userId
+    };
+
+    socket.emit('message', messageData);
+    setMessages(prev => [...prev, {
+      sender: userId,
+      text: newMessage,
+      timestamp: new Date().toISOString(),
+      isLocal: true
+    }]);
+    setNewMessage('');
+  };
+
+  useEffect(() => {
+    const handleMessage = (data) => {
+      setMessages(prev => [...prev, {
+        sender: data.sender,
+        text: data.text,
+        timestamp: data.timestamp,
+        isLocal: false
+      }]);
+    };
+
+    socket.on('message', handleMessage);
+
+    return () => {
+      socket.off('message', handleMessage);
+    };
+  }, []);
+
+  // Auto-scroll to bottom of messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // Render individual message component
+  const renderMessage = (msg, index) => (
+    <div key={index} style={{
+      textAlign: msg.isLocal ? 'right' : 'left',
+      margin: '5px 0'
+    }}>
+      <div style={{
+        display: 'inline-block',
+        padding: '8px 12px',
+        borderRadius: '12px',
+        background: msg.isLocal ? '#007bff' : '#e9ecef',
+        color: msg.isLocal ? 'white' : 'black',
+        maxWidth: '70%'
+      }}>
+        {msg.text}
+        <div style={{
+          fontSize: '0.7em',
+          marginTop: '4px',
+          color: msg.isLocal ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.5)'
+        }}>
+          {new Date(msg.timestamp).toLocaleTimeString()}
+        </div>
+      </div>
+    </div>
+  );
+
 
   return (
     <div className="App" style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
@@ -212,8 +284,60 @@ function App() {
           />
         </div>
       </div>
+
+      {/* Message Chat Section */}
+      <div style={{
+        marginTop: '20px',
+        border: '1px solid #ddd',
+        borderRadius: '8px',
+        padding: '10px',
+        height: '200px',
+        display: 'flex',
+        flexDirection: 'column'
+      }}>
+        <div style={{
+          flex: 1,
+          overflowY: 'auto',
+          marginBottom: '10px'
+        }}>
+          {messages.map(renderMessage)}
+          <div ref={messagesEndRef} />
+        </div>
+        <div style={{ display: 'flex' }}>
+          <input
+            type="text"
+            value={newMessage}
+            onChange={(e) => setNewMessage(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+            placeholder="Type a message..."
+            style={{
+              flex: 1,
+              padding: '8px',
+              borderRadius: '4px',
+              border: '1px solid #ddd',
+              marginRight: '8px'
+            }}
+            disabled={callStatus === 'disconnected'}
+          />
+          <button
+            onClick={sendMessage}
+            disabled={!newMessage.trim() || callStatus === 'disconnected'}
+            style={{
+              padding: '8px 16px',
+              background: '#007bff',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}
+          >
+            Send
+          </button>
+        </div>
+      </div>
     </div>
   );
+
 }
 
 export default App;
