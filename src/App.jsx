@@ -1,88 +1,101 @@
+// App.jsx
 import React, { useEffect, useRef, useState } from 'react';
 import io from 'socket.io-client';
 
-const socket = io('https://your-vercel-url.vercel.app'); // Replace with your Vercel URL
+const socket = io('https://webrtc-backend-q4qz.onrender.com'); // replace with your backend URL
+
 const peer = new RTCPeerConnection({
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+  ],
 });
 
 export default function App() {
-  const localRef = useRef();
-  const remoteRef = useRef();
-  const [myID, setMyID] = useState('');
-  const [otherUserID, setOtherUserID] = useState('');
+  const localRef = useRef(null);
+  const remoteRef = useRef(null);
+  const [roomID] = useState('room1'); // can make this dynamic
+  const [otherUser, setOtherUser] = useState(null);
 
   useEffect(() => {
-    // Get media from user
-    navigator.mediaDevices
-      .getUserMedia({ video: true, audio: true })
-      .then((stream) => {
-        localRef.current.srcObject = stream;
-        stream.getTracks().forEach((track) => peer.addTrack(track, stream));
-      });
+    let localStream;
 
-    // Peer connection handlers
-    peer.ontrack = (event) => {
-      remoteRef.current.srcObject = event.streams[0];
+    const init = async () => {
+      // Get media
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localRef.current.srcObject = localStream;
+      localStream.getTracks().forEach(track => peer.addTrack(track, localStream));
+
+      // Join room
+      socket.emit('join-room', roomID);
     };
 
-    peer.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit('candidate', {
-          target: otherUserID,
-          candidate: event.candidate,
-        });
+    init();
+
+    // ICE candidate
+    peer.onicecandidate = e => {
+      if (e.candidate && otherUser) {
+        socket.emit('candidate', { target: otherUser, candidate: e.candidate });
       }
     };
 
-    // Join room
-    const roomID = 'room1'; // Hardcoded room ID for simplicity
-    socket.emit('join-room', roomID);
+    // On track
+    peer.ontrack = e => {
+      if (remoteRef.current) {
+        remoteRef.current.srcObject = e.streams[0];
+      }
+    };
 
     // When another user joins
-    socket.on('user-joined', (userID) => {
-      setOtherUserID(userID);
-      if (peer.signalingState === 'stable') {
-        peer.createOffer().then((offer) => {
-          peer.setLocalDescription(offer);
-          socket.emit('offer', { sdp: offer, target: userID });
-        });
-      }
+    socket.on('user-joined', async userID => {
+      setOtherUser(userID);
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      socket.emit('offer', { target: userID, sdp: offer });
     });
 
-    // Receive offer from other user
+    // Receive offer
     socket.on('offer', async ({ sdp, caller }) => {
-      setOtherUserID(caller);
+      setOtherUser(caller);
       await peer.setRemoteDescription(new RTCSessionDescription(sdp));
+
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
-      socket.emit('answer', { sdp: answer, target: caller });
+      socket.emit('answer', { target: caller, sdp: answer });
     });
 
-    // Receive answer from other user
+    // Receive answer
     socket.on('answer', async ({ sdp }) => {
       await peer.setRemoteDescription(new RTCSessionDescription(sdp));
     });
 
-    // Receive ICE candidate
-    socket.on('candidate', async (candidate) => {
+    // Receive ICE
+    socket.on('candidate', async candidate => {
       try {
         await peer.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (err) {
-        console.error('Error adding ICE candidate', err);
+        console.error('Error adding ICE candidate:', err);
       }
     });
 
-    socket.on('room-full', () => {
-      alert('Room is full!');
-    });
-  }, [otherUserID]);
+    socket.on('room-full', () => alert('Room is full'));
+
+    return () => {
+      socket.disconnect();
+      peer.close();
+      if (localStream) localStream.getTracks().forEach(track => track.stop());
+    };
+  }, [roomID, otherUser]);
 
   return (
     <div>
-      <h2>React WebRTC Video Call (Room)</h2>
-      <video ref={localRef} autoPlay muted playsInline width={300} />
-      <video ref={remoteRef} autoPlay playsInline width={300} />
+      <h1>WebRTC Video Chat</h1>
+      <video ref={localRef} autoPlay muted playsInline width="300" />
+      <video ref={remoteRef} autoPlay playsInline width="300" />
     </div>
   );
 }
