@@ -23,7 +23,14 @@ function App() {
 
   const initPeerConnection = () => {
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        {
+          urls: 'turn:turn.example.com:3478',
+          username: 'user',
+          credential: 'pass',
+        },
+      ],
     });
 
     pc.onicecandidate = (event) => {
@@ -63,10 +70,11 @@ function App() {
   const startCall = async (targetUserId) => {
     if (callStatus !== 'waiting') return;
 
-    setRemoteUserId(targetUserId);
-    setCallStatus('connecting');
     initPeerConnection();
     await startLocalVideo();
+
+    setRemoteUserId(targetUserId);
+    setCallStatus('connecting');
 
     const offer = await pcRef.current.createOffer();
     await pcRef.current.setLocalDescription(offer);
@@ -75,6 +83,18 @@ function App() {
       targetUserId,
       signal: offer,
     });
+
+    pendingCandidates.forEach(candidate => {
+      socket.emit('signal', {
+        targetUserId,
+        signal: {
+          type: 'candidate',
+          candidate,
+        },
+      });
+    });
+
+    setPendingCandidates([]);
   };
 
   const handleSignal = async ({ signal, senderId }) => {
@@ -142,143 +162,93 @@ function App() {
   useEffect(() => {
     socket.on('signal', handleSignal);
 
-    socket.on('user-joined', (joinedUserId) => {
-      if (joinedUserId !== userId) {
-        setParticipants((prev) => [...prev, joinedUserId]);
-        if (callStatus === 'waiting') startCall(joinedUserId);
-      }
+    socket.on('user-joined', (userId) => {
+      setParticipants((prev) => [...prev, userId]);
     });
 
-    socket.on('user-left', (leftUserId) => {
-      if (leftUserId === remoteUserId) endCall();
-      setParticipants((prev) => prev.filter((id) => id !== leftUserId));
+    socket.on('user-left', (userId) => {
+      setParticipants((prev) => prev.filter((id) => id !== userId));
+    });
+
+    socket.on('message', (message) => {
+      setMessages((prev) => [...prev, message]);
     });
 
     socket.on('room-info', ({ participants, messages }) => {
       setParticipants(participants);
-      setMessages(
-        messages.map((msg) => ({
-          ...msg,
-          isLocal: msg.senderId === userId,
-        }))
-      );
-
-      const otherUsers = participants.filter((id) => id !== userId);
-      if (otherUsers.length > 0 && callStatus === 'waiting') {
-        startCall(otherUsers[0]);
-      }
-    });
-
-    socket.on('message', (message) => {
-      setMessages((prev) => [
-        ...prev,
-        { ...message, isLocal: message.senderId === userId },
-      ]);
+      setMessages(messages);
     });
 
     return () => {
-      socket.off('signal');
+      socket.off('signal', handleSignal);
       socket.off('user-joined');
       socket.off('user-left');
-      socket.off('room-info');
       socket.off('message');
+      socket.off('room-info');
     };
-  }, [userId, callStatus, remoteUserId]);
+  }, []);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages]);
 
   return (
-    <div style={{ fontFamily: 'Arial', background: '#f4f6f9', minHeight: '100vh', padding: '20px' }}>
-      <div style={{ maxWidth: '900px', margin: '0 auto', background: '#fff', borderRadius: '12px', padding: '30px' }}>
-        <h1 style={{ textAlign: 'center' }}>WebRTC Video Chat</h1>
-
-        <div style={{ marginBottom: '20px' }}>
+    <div>
+      {!joined ? (
+        <div>
           <input
             type="text"
-            placeholder="Enter Room ID"
+            placeholder="Room ID"
             value={roomId}
             onChange={(e) => setRoomId(e.target.value)}
-            style={{ padding: '10px', width: '70%', marginRight: '10px', borderRadius: '6px' }}
-            disabled={joined}
           />
-          <button
-            onClick={joinRoom}
-            disabled={joined || !roomId}
-            style={{ padding: '10px 20px', borderRadius: '6px', background: '#007bff', color: 'white' }}
-          >
-            Join Room
-          </button>
-          {joined && (
-            <button
-              onClick={endCall}
-              style={{ padding: '10px 20px', borderRadius: '6px', marginLeft: '10px', background: '#dc3545', color: 'white' }}
-            >
-              End Call
-            </button>
-          )}
-          <p style={{ marginTop: '10px' }}>
-            <strong>Status:</strong> {callStatus} | <strong>Participants:</strong> {participants.length}
-          </p>
+          <button onClick={joinRoom}>Join Room</button>
         </div>
-
-        <div style={{ display: 'flex', gap: '20px', justifyContent: 'center', marginBottom: '30px' }}>
+      ) : (
+        <div>
           <div>
-            <h3>Local Video</h3>
-            <video ref={localVideoRef} autoPlay muted playsInline style={{ width: '320px', height: '240px', background: '#ddd', borderRadius: '10px' }} />
+            <h3>Participants</h3>
+            <ul>
+              {participants.map((participant) => (
+                <li key={participant}>{participant}</li>
+              ))}
+            </ul>
           </div>
-          <div>
-            <h3>Remote Video</h3>
-            <video ref={remoteVideoRef} autoPlay playsInline style={{ width: '320px', height: '240px', background: '#ddd', borderRadius: '10px' }} />
-          </div>
-        </div>
 
-        <div style={{ border: '1px solid #ddd', borderRadius: '10px', padding: '10px', height: '250px', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ flex: 1, overflowY: 'auto', marginBottom: '10px' }}>
-            {messages.map((msg, index) => (
-              <div key={index} style={{ textAlign: msg.isLocal ? 'right' : 'left', margin: '5px 0' }}>
-                <div style={{
-                  display: 'inline-block',
-                  padding: '8px 12px',
-                  borderRadius: '12px',
-                  background: msg.isLocal ? '#007bff' : '#e9ecef',
-                  color: msg.isLocal ? 'white' : 'black',
-                  maxWidth: '70%',
-                }}>
-                  {msg.text}
-                  <div style={{
-                    fontSize: '0.7em',
-                    marginTop: '4px',
-                    color: msg.isLocal ? 'rgba(255,255,255,0.7)' : 'rgba(0,0,0,0.5)'
-                  }}>
-                    {new Date(msg.timestamp).toLocaleTimeString()}
-                  </div>
-                </div>
-              </div>
-            ))}
-            <div ref={messagesEndRef} />
+          <div>
+            <video ref={localVideoRef} autoPlay muted></video>
+            <video ref={remoteVideoRef} autoPlay></video>
           </div>
-          <div style={{ display: 'flex', gap: '10px' }}>
-            <input
-              type="text"
-              value={newMessage}
-              onChange={(e) => setNewMessage(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
-              placeholder="Type a message..."
-              disabled={callStatus === 'disconnected'}
-              style={{ flex: 1, padding: '10px', borderRadius: '8px', border: '1px solid #ccc' }}
-            />
-            <button
-              onClick={sendMessage}
-              disabled={!newMessage.trim() || callStatus === 'disconnected'}
-              style={{ padding: '10px 16px', background: '#007bff', color: 'white', border: 'none', borderRadius: '8px' }}
-            >
-              Send
-            </button>
+
+          <div>
+            <button onClick={() => startCall(participants[0])}>Start Call</button>
+            <button onClick={endCall}>End Call</button>
+          </div>
+
+          <div>
+            <div>
+              <textarea
+                value={newMessage}
+                onChange={(e) => setNewMessage(e.target.value)}
+                placeholder="Type a message"
+              ></textarea>
+              <button onClick={sendMessage}>Send</button>
+            </div>
+            <div>
+              <ul>
+                {messages.map((msg, index) => (
+                  <li key={index}>
+                    {msg.senderId}: {msg.text}
+                  </li>
+                ))}
+                <div ref={messagesEndRef}></div>
+              </ul>
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }
