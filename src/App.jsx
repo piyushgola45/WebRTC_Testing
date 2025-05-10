@@ -4,49 +4,52 @@ import io from 'socket.io-client';
 const socket = io('https://webrtc-backend-q4qz.onrender.com');
 
 function App() {
-   const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const messagesEndRef = useRef(null);
 
-  const [userId, setUserId] = useState('');
-  const [remoteUserId, setRemoteUserId] = useState('');
+  const [userId] = useState(Math.random().toString(36).substring(2, 9));
+  const [roomId, setRoomId] = useState('');
   const [callStatus, setCallStatus] = useState('disconnected');
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
+  const [remoteUserId, setRemoteUserId] = useState(null);
+  const [participants, setParticipants] = useState([]);
   
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   const pcRef = useRef(null);
 
-  // Initialize user ID on component mount
-
+  // Join room on mount or when roomId changes
   useEffect(() => {
-    const id = Math.random().toString(36).substring(2, 9);
-    setUserId(id);
-    socket.emit('join', id);
+    if (roomId) {
+      socket.emit('join-room', roomId, userId);
+      setCallStatus('waiting');
+    }
 
-    // Clean up on unmount
     return () => {
       if (localStream) {
         localStream.getTracks().forEach(track => track.stop());
       }
-      socket.disconnect();
+      if (pcRef.current) {
+        pcRef.current.close();
+      }
     };
-  }, []);
+  }, [roomId, userId]);
 
   // Initialize peer connection
   const initPeerConnection = () => {
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        // You may want to add your own TURN server here for production
+        // Add your own TURN server here for production
       ]
     });
 
     pc.onicecandidate = (event) => {
-      if (event.candidate) {
+      if (event.candidate && remoteUserId) {
         socket.emit('signal', {
-          target: remoteUserId,
+          targetUserId: remoteUserId,
           signal: {
             type: 'candidate',
             candidate: event.candidate
@@ -84,9 +87,7 @@ function App() {
 
   // Handle incoming signals
   useEffect(() => {
-    socket.on('signal', async (data) => {
-      if (data.sender !== remoteUserId) return;
-
+    const handleSignal = async (data) => {
       try {
         const pc = pcRef.current;
         if (!pc) return;
@@ -97,7 +98,7 @@ function App() {
           await pc.setLocalDescription(answer);
           
           socket.emit('signal', {
-            target: remoteUserId,
+            targetUserId: data.senderId,
             signal: answer
           });
           setCallStatus('connected');
@@ -112,27 +113,72 @@ function App() {
       } catch (err) {
         console.error('Error handling signal:', err);
       }
+    };
+
+    socket.on('signal', handleSignal);
+
+    return () => {
+      socket.off('signal', handleSignal);
+    };
+  }, []);
+
+  // Handle room events
+  useEffect(() => {
+    socket.on('user-joined', (joinedUserId) => {
+      if (joinedUserId !== userId) {
+        setRemoteUserId(joinedUserId);
+        setParticipants(prev => [...prev, joinedUserId]);
+        
+        if (callStatus === 'waiting') {
+          // We were waiting, now initiate call
+          startCall(joinedUserId);
+        }
+      }
     });
 
-    socket.on('user-disconnected', (disconnectedUserId) => {
-      if (disconnectedUserId === remoteUserId) {
+    socket.on('user-left', (leftUserId) => {
+      if (leftUserId === remoteUserId) {
         setCallStatus('disconnected');
-        setRemoteUserId('');
+        setRemoteUserId(null);
         if (remoteVideoRef.current) {
           remoteVideoRef.current.srcObject = null;
         }
       }
+      setParticipants(prev => prev.filter(id => id !== leftUserId));
     });
-  }, [remoteUserId]);
 
-  // Start a call
-  const startCall = async () => {
-    if (!remoteUserId) {
-      alert('Please enter a remote user ID');
-      return;
-    }
+    socket.on('room-info', ({ participants, messages }) => {
+      setParticipants(participants);
+      setMessages(messages.map(msg => ({
+        ...msg,
+        isLocal: msg.senderId === userId
+      })));
+      
+      // If there are participants already, initiate call
+      if (participants.length > 0 && callStatus === 'waiting') {
+        setRemoteUserId(participants[0]);
+        startCall(participants[0]);
+      }
+    });
 
-    setCallStatus('calling');
+    socket.on('message', (message) => {
+      setMessages(prev => [...prev, {
+        ...message,
+        isLocal: message.senderId === userId
+      }]);
+    });
+
+    return () => {
+      socket.off('user-joined');
+      socket.off('user-left');
+      socket.off('room-info');
+      socket.off('message');
+    };
+  }, [userId, callStatus, remoteUserId]);
+
+  // Start a call with specific user
+  const startCall = async (targetUserId) => {
+    setCallStatus('connecting');
     initPeerConnection();
     await startLocalVideo();
 
@@ -142,7 +188,7 @@ function App() {
       await pc.setLocalDescription(offer);
 
       socket.emit('signal', {
-        target: remoteUserId,
+        targetUserId: targetUserId,
         signal: offer
       });
     } catch (err) {
@@ -154,7 +200,7 @@ function App() {
   // End the call
   const endCall = () => {
     setCallStatus('disconnected');
-    setRemoteUserId('');
+    setRemoteUserId(null);
     
     if (pcRef.current) {
       pcRef.current.close();
@@ -165,41 +211,19 @@ function App() {
       remoteVideoRef.current.srcObject = null;
     }
   };
+
   const sendMessage = () => {
-    if (!newMessage.trim() || !remoteUserId) return;
+    if (!newMessage.trim()) return;
 
-    const messageData = {
-      text: newMessage,
-      target: remoteUserId,
-      sender: userId
-    };
-
-    socket.emit('message', messageData);
+    socket.emit('message', newMessage);
     setMessages(prev => [...prev, {
-      sender: userId,
+      senderId: userId,
       text: newMessage,
       timestamp: new Date().toISOString(),
       isLocal: true
     }]);
     setNewMessage('');
   };
-
-  useEffect(() => {
-    const handleMessage = (data) => {
-      setMessages(prev => [...prev, {
-        sender: data.sender,
-        text: data.text,
-        timestamp: data.timestamp,
-        isLocal: false
-      }]);
-    };
-
-    socket.on('message', handleMessage);
-
-    return () => {
-      socket.off('message', handleMessage);
-    };
-  }, []);
 
   // Auto-scroll to bottom of messages
   useEffect(() => {
@@ -232,112 +256,134 @@ function App() {
     </div>
   );
 
-
   return (
-    <div className="App" style={{ padding: '20px', maxWidth: '800px', margin: '0 auto' }}>
-      <h1>WebRTC Video Call</h1>
-      <div>
-        <p>Your ID: <strong>{userId}</strong></p>
-        <div>
-          <label htmlFor="remoteUserId">Call to: </label>
-          <input
-            id="remoteUserId"
-            type="text"
-            value={remoteUserId}
-            onChange={(e) => setRemoteUserId(e.target.value)}
-            disabled={callStatus !== 'disconnected'}
-          />
-          <button 
-            onClick={startCall} 
-            disabled={callStatus !== 'disconnected' || !remoteUserId}
-          >
-            Call
-          </button>
-          <button 
-            onClick={endCall} 
-            disabled={callStatus === 'disconnected'}
-          >
-            End Call
-          </button>
-        </div>
-        <p>Status: {callStatus}</p>
-      </div>
-
-      <div style={{ display: 'flex', gap: '20px', marginTop: '20px' }}>
-        <div>
-          <h3>Local Video</h3>
-          <video 
-            ref={localVideoRef} 
-            autoPlay 
-            muted 
-            playsInline
-            style={{ width: '300px', height: '225px', backgroundColor: '#eee' }}
-          />
-        </div>
-        <div>
-          <h3>Remote Video</h3>
-          <video 
-            ref={remoteVideoRef} 
-            autoPlay 
-            playsInline
-            style={{ width: '300px', height: '225px', backgroundColor: '#eee' }}
-          />
-        </div>
-      </div>
-
-      {/* Message Chat Section */}
+    <div style={{
+      fontFamily: 'Arial, sans-serif',
+      background: '#f4f6f9',
+      minHeight: '100vh',
+      padding: '20px'
+    }}>
       <div style={{
-        marginTop: '20px',
-        border: '1px solid #ddd',
-        borderRadius: '8px',
-        padding: '10px',
-        height: '200px',
-        display: 'flex',
-        flexDirection: 'column'
+        maxWidth: '900px',
+        margin: '0 auto',
+        background: '#fff',
+        borderRadius: '12px',
+        boxShadow: '0 4px 20px rgba(0,0,0,0.1)',
+        padding: '30px'
       }}>
-        <div style={{
-          flex: 1,
-          overflowY: 'auto',
-          marginBottom: '10px'
-        }}>
-          {messages.map(renderMessage)}
-          <div ref={messagesEndRef} />
+        <h1 style={{ textAlign: 'center', marginBottom: '20px' }}>WebRTC Video Chat</h1>
+
+        <div style={{ marginBottom: '20px' }}>
+          <p><strong>Your ID:</strong> {userId}</p>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <input
+              type="text"
+              placeholder="Enter room ID"
+              value={roomId}
+              onChange={(e) => setRoomId(e.target.value)}
+              disabled={callStatus !== 'disconnected'}
+              style={{
+                flex: 1,
+                padding: '10px',
+                borderRadius: '8px',
+                border: '1px solid #ccc'
+              }}
+            />
+            <button
+              onClick={endCall}
+              disabled={callStatus === 'disconnected'}
+              style={{
+                padding: '10px 16px',
+                background: '#dc3545',
+                color: 'white',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer'
+              }}
+            >
+              Leave
+            </button>
+          </div>
+          <p style={{ marginTop: '10px' }}>
+            <strong>Status:</strong> {callStatus}
+            {participants.length > 0 && ` | Participants: ${participants.length}`}
+          </p>
         </div>
-        <div style={{ display: 'flex' }}>
-          <input
-            type="text"
-            value={newMessage}
-            onChange={(e) => setNewMessage(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
-            placeholder="Type a message..."
-            style={{
-              flex: 1,
-              padding: '8px',
-              borderRadius: '4px',
-              border: '1px solid #ddd',
-              marginRight: '8px'
-            }}
-            disabled={callStatus === 'disconnected'}
-          />
-          <button
-            onClick={sendMessage}
-            disabled={!newMessage.trim() || callStatus === 'disconnected'}
-            style={{
-              padding: '8px 16px',
-              background: '#007bff',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer'
-            }}
-          >
-            Send
-          </button>
+
+        <div style={{
+          display: 'flex',
+          gap: '20px',
+          justifyContent: 'center',
+          marginBottom: '30px'
+        }}>
+          <div style={{ textAlign: 'center' }}>
+            <h3>Local Video</h3>
+            <video
+              ref={localVideoRef}
+              autoPlay
+              muted
+              playsInline
+              style={{ width: '320px', height: '240px', borderRadius: '10px', background: '#ddd' }}
+            />
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <h3>Remote Video</h3>
+            <video
+              ref={remoteVideoRef}
+              autoPlay
+              playsInline
+              style={{ width: '320px', height: '240px', borderRadius: '10px', background: '#ddd' }}
+            />
+          </div>
+        </div>
+
+        <div style={{
+          border: '1px solid #ddd',
+          borderRadius: '10px',
+          padding: '10px',
+          background: '#fafafa',
+          height: '250px',
+          display: 'flex',
+          flexDirection: 'column'
+        }}>
+          <div style={{ flex: 1, overflowY: 'auto', marginBottom: '10px' }}>
+            {messages.map(renderMessage)}
+            <div ref={messagesEndRef} />
+          </div>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <input
+              type="text"
+              value={newMessage}
+              onChange={(e) => setNewMessage(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
+              placeholder="Type a message..."
+              style={{
+                flex: 1,
+                padding: '10px',
+                borderRadius: '8px',
+                border: '1px solid #ccc'
+              }}
+              disabled={callStatus === 'disconnected'}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={!newMessage.trim() || callStatus === 'disconnected'}
+              style={{
+                padding: '10px 16px',
+                background: '#007bff',
+                color: 'white',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer'
+              }}
+            >
+              Send
+            </button>
+          </div>
         </div>
       </div>
     </div>
   );
-
 }
 
 export default App;
