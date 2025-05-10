@@ -20,7 +20,13 @@ function App() {
   const remoteVideoRef = useRef(null);
   const pcRef = useRef(null);
 
-  // Join room on mount or when roomId changes
+  // Generate a random room ID when component mounts
+  useEffect(() => {
+    const generatedRoomId = Math.random().toString(36).substring(2, 8);
+    setRoomId(generatedRoomId);
+  }, []);
+
+  // Join room when roomId is set
   useEffect(() => {
     if (roomId) {
       socket.emit('join-room', roomId, userId);
@@ -42,7 +48,6 @@ function App() {
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        // Add your own TURN server here for production
       ]
     });
 
@@ -116,10 +121,7 @@ function App() {
     };
 
     socket.on('signal', handleSignal);
-
-    return () => {
-      socket.off('signal', handleSignal);
-    };
+    return () => socket.off('signal', handleSignal);
   }, []);
 
   // Handle room events
@@ -130,7 +132,6 @@ function App() {
         setParticipants(prev => [...prev, joinedUserId]);
         
         if (callStatus === 'waiting') {
-          // We were waiting, now initiate call
           startCall(joinedUserId);
         }
       }
@@ -154,7 +155,6 @@ function App() {
         isLocal: msg.senderId === userId
       })));
       
-      // If there are participants already, initiate call
       if (participants.length > 0 && callStatus === 'waiting') {
         setRemoteUserId(participants[0]);
         startCall(participants[0]);
@@ -274,36 +274,55 @@ function App() {
         <h1 style={{ textAlign: 'center', marginBottom: '20px' }}>WebRTC Video Chat</h1>
 
         <div style={{ marginBottom: '20px' }}>
-          <p><strong>Your ID:</strong> {userId}</p>
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-            <input
-              type="text"
-              placeholder="Enter room ID"
-              value={roomId}
-              onChange={(e) => setRoomId(e.target.value)}
-              disabled={callStatus !== 'disconnected'}
-              style={{
-                flex: 1,
-                padding: '10px',
-                borderRadius: '8px',
-                border: '1px solid #ccc'
-              }}
-            />
-            <button
-              onClick={endCall}
-              disabled={callStatus === 'disconnected'}
-              style={{
-                padding: '10px 16px',
-                background: '#dc3545',
-                color: 'white',
-                border: 'none',
-                borderRadius: '8px',
-                cursor: 'pointer'
-              }}
-            >
-              Leave
-            </button>
+          <div style={{ 
+            padding: '15px', 
+            backgroundColor: '#f8f9fa',
+            borderRadius: '8px',
+            marginBottom: '15px'
+          }}>
+            <p style={{ fontWeight: 'bold', marginBottom: '5px' }}>Room ID:</p>
+            <div style={{ 
+              display: 'flex', 
+              alignItems: 'center',
+              justifyContent: 'space-between'
+            }}>
+              <input
+                type="text"
+                value={roomId}
+                onChange={(e) => setRoomId(e.target.value)}
+                style={{
+                  flex: 1,
+                  padding: '10px',
+                  borderRadius: '8px',
+                  border: '1px solid #ccc',
+                  marginRight: '10px',
+                  fontWeight: 'bold',
+                  textAlign: 'center'
+                }}
+                readOnly
+              />
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(roomId);
+                  alert('Room ID copied to clipboard!');
+                }}
+                style={{
+                  padding: '10px',
+                  background: '#6c757d',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '8px',
+                  cursor: 'pointer'
+                }}
+              >
+                Copy
+              </button>
+            </div>
+            <p style={{ marginTop: '10px', fontSize: '0.9em', color: '#6c757d' }}>
+              Share this ID with the other participant
+            </p>
           </div>
+
           <p style={{ marginTop: '10px' }}>
             <strong>Status:</strong> {callStatus}
             {participants.length > 0 && ` | Participants: ${participants.length}`}
