@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 
-// const socket = io('https://webrtc-backend-q4qz.onrender.com');
-const socket = io('http://localhost:5000');
+const socket = io('https://webrtc-backend-q4qz.onrender.com');
+// const socket = io('http://localhost:5000');
 function App() {
    const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
